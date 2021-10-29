@@ -1,0 +1,655 @@
+---
+title: "Moving Beyond Linearity"
+author: "Nur Andi Setiabudi^[Mahasiswa Pascasarjana Statistika dan Sains Data, Institut Pertanian Bogor, NIM: G1501211061, nur.andi@apps.ipb.ac.id]"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::downcute:
+    self_contained: yes
+    highlight: kate
+    df_print: kable
+    number_sections: no
+  html_document:
+    toc: yes
+    toc_depth: '2'
+    df_print: paged
+  word_document:
+    toc: yes
+    toc_depth: 2
+    number_sections: yes
+subtitle: Tugas Kuliah STA581 Sains Data
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE,
+                      fig.width=10, fig.height=6)
+```
+
+# Pendahuluan
+
+## Tujuan
+
+* Melakukan *cross validation* untuk menghasilkan pemodelan antara tingkat efisiensi penggunaan bahan bakar (direpresentasikan oleh`mpg` atau *miles per gallon*) *versus* daya mesin (dalam `horsepower`) optimal berdasarkan data `ISLR::Auto` dengan metode:
+
+  * *Polynomial regression*
+  * *Piecewise constant*
+  * *Natural cubic splines*
+
+* Pemodelan dilakukan untuk masing-masing subset berdasarkan negara asal (`origin`), yaitu 1) Amerika, 2) Eropa, dan 3) Jepang
+
+## Output
+
+Mendapatkan model non-linier yang optimal untuk masing-masing negara asal.
+
+
+# Metodologi
+
+## Tahapan
+
+Pemodelan dilakukan dengan tahapan sebagai berikut:
+
+![](https://raw.githubusercontent.com/nurandi/sta561/main/img/flow-chart-auto.png)
+
+
+## Skenario *Tuning Parameter*
+
+* ***Cross validation***
+
+   *4-fold cross validation* dengan meminimumkan RMSE (*root mean squared error*)
+
+* ***Polynomial regression***
+
+   Derajat/*degree* polinomial awal: `c(2:10)`
+
+* ***Piecewise constant***
+
+   Jumlah *bins*/*breaks* awal: `c(2:10)`
+
+* ***Natural Cubic Spline***
+
+   Jumlah dan lokasi *knots* awal ditentukan perdasarkan *quantile*:
+
+| Jumlah *knots* | Lokasi *knots* (*quantiles*)                    |
+|----------------|-------------------------------------------------|
+| 1              | `.5,`                                           |
+| 2              | `.33 * c(1:2)`                                  |
+| 3              | `.25 * c(1:3)`                                  |
+| 3*             | `c(.10, .5, .90)`                               |
+| 4              | `.20 * c(1:4)`                                  |
+| 4*             | `c(.05, .35, .65, .95)`                         |
+| 5              | `.167 * c(1:5)`                                 |
+| 5*             | `c(.05, .275, .5, .725, .95)`                   |
+| 6              | `.143 * c(1:6)`                                 |
+| 6*             | `c(.05, .23, .41, .59, .77, .95)`               |
+| 7              | `.125 * c(1:7)`                                 |
+| 7*             | `c(.025, .1833, .3417, .5, .6583, .8167, .975)` |
+
+Sumber : Frank E. Harrell, Jr. (2015).  *Regression Modeling Strategies*
+
+## *Tools*
+
+* R
+* `splines` dan `stats` untuk pemodelan
+* `caret` untuk *cross validation*
+* `ggplot2` dan `cowplot` untuk grafik/visualisasi
+
+
+## Kumpulan Fungsi
+
+Untuk memudahkan iterasi, dibuat beberapa fungsi:
+
+### *Modeling* dan *Cross Validation*
+
+```{r}
+library(splines)
+library(caret)
+
+beyondLinear <- function(model, param, df){
+  
+  dat <- df
+  
+  #' model <string> : modeling approach, ie. polynomial (polynomial regression),
+  #'   piecewise (piecewise constant), ncubicspline (natural cubic spline)
+  #' param <list or vector> : list of tuning parameters to be evaluated
+
+  cvResult <- mapply(
+      function(param, model){
+        
+        if (model == "polynomial"){
+          f <- bquote(mpg ~ poly(horsepower, degree = .(param)))
+        } else if (model == "piecewise") {
+          f <- bquote(mpg ~ cut(horsepower, breaks = .(param)))
+        } else if (model == "ncubicspline") {
+          f <- bquote(mpg ~ ns(horsepower, knots = .(param)))
+        } 
+  
+        trCtl <- trainControl(method='cv', number = 4)
+        models <- train(as.formula(f), data = df, trControl = trCtl, method = 'glm')
+        
+        RMSE <- models$results$RMSE
+        fModel <- models$finalModel
+        
+        return(list(models, RMSE, fModel))
+      },  model = model, param = param, USE.NAMES = FALSE, SIMPLIFY = FALSE )
+  
+  
+  if(!is.null(names(param))){
+    paramIdx <- names(param)
+  } else {
+    paramIdx <- param
+  }
+
+  cvScore <- data.frame(paramIdx = as.character(unlist(paramIdx)),
+                        score = unlist(sapply(cvResult, "[", 2, USE.NAMES = F)))
+  cvScore$param <- param
+  
+  bestPos <- which.min(cvScore$score)[1]
+  bestParam <- param[[bestPos]]
+  bestScore <- cvResult[[bestPos]][[2]]
+  bestModel <- cvResult[[bestPos]][[1]]
+  
+  predValue <- data.frame(df[c("mpg","horsepower")], 
+                    pred = predict(bestModel, df, interval = "prediction"))
+  
+  return(list(model = model,
+              cvScore = cvScore, 
+              whichBest = bestPos, 
+              bestParamIdx = paramIdx[bestPos],
+              bestParam = bestParam, 
+              bestScore = bestScore, 
+              bestModel = bestModel,
+              predValue = predValue))
+}
+```
+
+### Grafik
+
+```{r}
+library(ggplot2)
+library(cowplot)
+
+cvPlot <- function(df, title, xlab){
+  scaleFUN <- function(x) as.character(round(x,2))
+  df$paramIdx <- factor(df$paramIdx, levels = df$paramIdx)
+  
+  ggplot(df, aes(x=paramIdx, y=score)) + 
+    geom_bar(stat = "identity", width=0.1, fill = "black") +
+    coord_cartesian(ylim = c(0.99*min(df$score), NA)) +
+    geom_hline(yintercept = min(df$score), linetype="dashed", color = "red") +
+    ggtitle(title) +
+    xlab(xlab) + ylab("Root Mean Squared Error") +
+    theme_classic()
+}
+
+predPlot <- function(df, title){
+  ggplot(df) +
+    geom_point(aes(x = horsepower, y = mpg, fill = "*")) +
+    geom_line(aes(x = horsepower, y = pred, color = "*"), size = 1) +
+    scale_fill_manual(labels = c("Observed"), values = c("black")) +
+    scale_color_manual(labels = c("Predicted"), values = c("blue"))  +
+    xlim(40, 235) +
+    theme_classic() +
+    ggtitle(title) +
+    xlab("Horsepower") + ylab("Miles per Gallon") +
+    theme(legend.title = element_blank(), 
+          legend.position = "bottom", 
+          legend.box = "horizontal")
+}
+
+predPlotAll <- function(df) {
+  ggplot(df) +
+  geom_point(aes(x = horsepower, y = mpg, fill = "*")) +
+  geom_line(aes(x = horsepower, y = polynomial, color = "a"), size = 1) +
+  geom_line(aes(x = horsepower, y = piecewise, color = "b"), size = 1) +
+  geom_line(aes(x = horsepower, y = ncubicspline, color = "c"), size = 1) +
+  scale_fill_manual(labels = c("Observed"), values = c("black")) +
+  scale_color_manual(labels = c("Polynomial", "Piecewise", "Natural Cubic Splines"), 
+                     values = c("blue", "red", "green"))  +
+  xlim(40, 235) +
+  theme_classic() +
+  ggtitle("Comparison of Best Predictions") +
+  xlab("Horsepower") + ylab("Miles per Gallon") +
+  theme(legend.title = element_blank(), 
+        legend.position = "bottom", 
+        legend.box = "horizontal")
+}
+
+```
+
+
+### Fungsi *wrapper*
+
+```{r}
+
+generateAllREg <- function(df, orig, degree, cut, knot, best=NULL){
+
+  methods <- c("polynomial", "piecewise", "ncubicspline")
+  method_alias <- c("Polynomial Regression", "Piecewise Constant", "Natural Cubic Splines")
+  params <- list(Degree = degree, `N Bins` = cut, `N Knots` = knot)
+  
+  outModel <- list()
+  pltCV <- list()
+  pltPred <- list()
+  
+  for( i in seq(length(methods)) ){
+    
+    model <- beyondLinear(model = methods[i], param = params[[i]], df = df)
+      
+    outModel[[i]] <- model
+    
+
+    p <- cvPlot(model$cvScore,
+           title = method_alias[i],
+           xlab =  names(params)[i])
+    
+    pltCV[[i]] <- p
+    
+    p <- predPlot(model$predValue, 
+             sprintf("%s with %s=%s (RMSE=%s)", 
+                     method_alias[i], names(params)[i], 
+                     model$bestParamIdx, round(model$bestScore,2)))
+    
+    if(methods[i] == "ncubicspline"){
+      p <- p + geom_vline(xintercept = model$bestParam, linetype="dashed", color = "gray")
+    }
+  
+    pltPred[[i]] <- p
+  }
+  
+  bestSummary <- data.frame(t(sapply(outModel, "[", c("model", "bestParamIdx", "bestScore"))))
+  names(bestSummary) <- c("method", "param", "RMSE")
+  
+  bestSummary <- cbind(origin = orig, bestSummary)
+  
+  predAllBest <- data.frame(outModel[[1]]$predValue, 
+                            outModel[[2]]$predValue$pred, 
+                            outModel[[3]]$predValue$pred)
+  names(predAllBest) <- c("mpg","horsepower", methods)
+  
+  pltPredAll <- predPlotAll(predAllBest)
+
+  if(is.null(best)){
+    bIdx <- which.min(bestSummary$RMSE)
+  } else {
+    bIdx <- best
+  }
+  
+  bestModel <- bestSummary[bIdx, ]
+
+  predicted <- outModel[[bIdx]]$predValue
+  predicted <- cbind(origin = orig, predicted)
+  
+  return(list(bestSummary = bestSummary, 
+              bestModel = bestModel,
+              bestModelDetail = outModel[[bIdx]]$bestModel,
+              bestParamDetail = outModel[[bIdx]]$bestParam,
+              model = outModel, 
+              pltCV = pltCV, 
+              pltPred = pltPred,
+              pltPredAll = pltPredAll,
+              pltCVGrid = plot_grid(pltCV[[1]], pltCV[[2]], pltCV[[3]]),
+              pltPredGrid = plot_grid(pltPred[[1]], pltPred[[2]], pltPred[[3]], pltPredAll),
+              predBest3 = predAllBest,
+              predBestFinal = predicted))
+
+}
+
+
+```
+
+### Penentuan *Knots*
+
+```{r}
+pctKnots <- function(x){
+  pct <- list(
+    .5,
+    .33*c(1:2),
+    .25*c(1:3),
+    c(.10,.5,.90),
+    .20*c(1:4),
+    c(.05,.35,.65,.95),
+    .167*c(1:5),
+    c(.05,.275,.5,.725,.95),
+    .143*c(1:6),
+    c(.05,.23,.41,.59,.77,.95),
+    .125*c(1:7),
+    c(.025,.1833,.3417,.5,.6583,.8167,.975))
+  
+  knt <- sapply(pct, function(p, i){round(quantile(i, p),2)}, i = x)
+  names(knt) <- c(1,2,3,"3*",4,"4*",5,"5*",6,"6*",7,"7*")
+  return(knt)
+  
+}
+```
+
+# Hasil dan Pembahasan
+
+## Preview Dataset
+
+```{r}
+library(ISLR)
+head(Auto)
+
+summary(Auto)
+```
+### Hubungan `mpg` dan `horsepower`
+
+```{r, fig.height=5}
+library(ggplot2)
+ggplot(Auto) +
+  geom_point(aes(x = horsepower, y = mpg), alpha = 0.8) +
+  ggtitle("Miles per Gallon vs Horsepower") +
+  xlab("Horsepower") + ylab("Miles per Gallon") +
+  theme_classic() 
+```
+
+### Berdasarkan `origin`
+
+```{r}
+freq <- table(Auto$origin)
+data.frame(cbind(freq, prop = prop.table(freq)))
+```
+
+```{r, fig.height=5}
+p <- ggplot(Auto) +
+  geom_point(aes(x = horsepower, y = mpg, color = as.factor(origin)), alpha = 0.8) +
+  scale_color_manual(values = c("black", "red", "blue"),
+                     labels = c("American", "European", "Japanese")) +
+  ggtitle("Miles per Gallon vs Horsepower, by Origin") +
+  xlab("Horsepower") + ylab("Miles per Gallon") +
+  theme_classic() +
+  theme(legend.title = element_blank(), 
+        legend.position = "bottom", 
+        legend.box = "horizontal")
+p
+```
+
+```{r, fig.height=8}
+p + facet_grid(origin ~ .)
+```
+
+Berdasarkan visualisasi di atas terlihat bahwa hubungan `mpg` dan `horsepower` tidak bersifat linear. Untuk itu diperlukan metode non-linear untuk mendapatkan pemodelan optimal.
+
+
+## Semua Negara
+
+```{r}
+AutoKnots <- pctKnots(Auto$horsepower)
+
+set.seed(1234)
+orig0 <- generateAllREg(df = Auto, 
+                  orig = "Semua Negara", 
+                  degree = c(2:10), cut = c(2:10), knot = AutoKnots)
+```
+
+### *Cross validation*
+
+```{r}
+orig0$pltCVGrid
+```
+
+### Ringkasan *tuning parameter* terbaik
+
+```{r}
+orig0$bestSummary
+orig0$bestModel
+```
+***Tunning Parameter*** **terbaik**
+
+```{r}
+orig0$bestParamDetail
+```
+
+### Nilai observasi *vs* prediksi
+
+```{r}
+orig0$pltPredGrid
+```
+
+Model terbaik yang diperoleh dari *cross-validation* adalah *natural cubic spline* dengan 4 knots.
+
+
+### Ringkasan *modeling*
+
+```{r}
+summary(orig0$bestModelDetail)
+```
+
+
+## Origin 1: Amerika
+
+
+```{r}
+Auto1 <- Auto[Auto$origin == 1, ]
+Auto1Knots <- pctKnots(Auto1$horsepower)
+
+set.seed(1234)
+orig1 <- generateAllREg(df = Auto1, 
+                  orig = "Amerika", 
+                  degree = c(2:10), cut = c(2:10), knot = Auto1Knots)
+```
+
+### *Cross validation*
+
+```{r}
+orig1$pltCVGrid
+```
+
+### Ringkasan *tuning parameter* terbaik
+
+```{r}
+orig1$bestSummary
+orig1$bestModel
+```
+***Tunning Parameter*** **terbaik**
+
+```{r}
+orig1$bestParamDetail
+```
+
+### Nilai observasi *vs* prediksi
+
+```{r}
+orig1$pltPredGrid
+```
+
+### Ringkasan *modeling*
+
+```{r}
+summary(orig1$bestModelDetail)
+```
+
+## Origin 2: Eropa
+
+```{r}
+Auto2 <- Auto[Auto$origin == 2, ]
+Auto2Knots <- pctKnots(Auto2$horsepower)
+
+set.seed(1234)
+orig2 <- generateAllREg(df = Auto2, 
+                  orig = "Eropa", 
+                  degree = c(2:8), cut = c(2:10), knot = Auto2Knots)
+```
+
+
+### *Cross validation*
+
+```{r}
+orig2$pltCVGrid
+```
+
+### Ringkasan *tuning parameter* terbaik
+
+```{r}
+orig2$bestSummary
+orig2$bestModel
+```
+***Tunning Parameter*** **terbaik**
+
+```{r}
+orig2$bestParamDetail
+```
+
+### Nilai observasi *vs* prediksi
+
+```{r}
+orig2$pltPredGrid
+```
+
+### Ringkasan *modeling*
+
+```{r}
+summary(orig2$bestModelDetail)
+```
+
+
+## Origin 3: Jepang
+
+```{r}
+Auto3 <- Auto[Auto$origin == 3, ]
+Auto3Knots <- pctKnots(Auto3$horsepower)
+
+set.seed(1234)
+orig3 <- generateAllREg(df = Auto3, 
+                  orig = "Jepang", 
+                  degree = c(2:8), cut = c(2:10), knot = Auto3Knots)
+```
+
+
+### *Cross validation*
+
+```{r}
+orig3$pltCVGrid
+```
+
+### Ringkasan *tuning parameter* terbaik
+
+```{r}
+orig3$bestSummary
+orig3$bestModel
+```
+
+### Nilai observasi *vs* prediksi
+
+```{r}
+orig3$pltPredGrid
+```
+
+### Ringkasan *modeling*
+
+```{r}
+summary(orig3$bestModelDetail)
+```
+## Origin 3: Jepang *(Refined)*
+
+Meskipun mempunyai RMSE yang paling rendah berdasarkan hasil *k-fold cross validation*, model terbaik secara visual menunjukkan adanya belokan di sekitar ujung-ujung kurva. Hal ini dirasa kurang masuk akal. Untuk itu perlu dilakukan "revisi" model. Karena ketiga metode menunjukkan pola yang sama, akan dilakukan revisi terhadap model *natural cubic spline*. Langkah yang dilakukan adalah dengan menghapus knot dan mengubah lokasi (dalam hal ini adalah persentil 10 sampai dengan 90).
+
+
+```{r}
+newKnots <- as.list(quantile(Auto3$horsepower, seq(0.1, 0.9, by=0.1)))
+names(newKnots) <- paste0("1.", letters[1:length(newKnots)])
+
+set.seed(1234)
+orig3b <- generateAllREg(df = Auto3, 
+                  orig = "Jepang", 
+                  degree = c(2:8), cut = c(2:10), knot = newKnots, best = 3)
+```
+
+
+### *Cross validation*
+
+```{r}
+orig3b$pltCVGrid
+```
+
+### Ringkasan *tuning parameter* terbaik
+
+```{r}
+orig3b$bestSummary
+orig3b$bestModel
+```
+
+### Ringkasan *modeling*
+
+```{r}
+summary(orig3b$bestModelDetail)
+```
+
+### Perbandingan model lama dan baru
+
+```{r, fig.height=5}
+plt <- orig3$pltPred[[3]]
+
+
+plt + geom_line(data = orig3b$model[[3]]$predValue, 
+                aes(x = horsepower, y = pred, color = "1"), size = 1) +
+scale_color_manual(labels = c(sprintf("%s(%s)",orig3$bestSummary[3,2],orig3$bestSummary[3,3]),
+                              sprintf("%s(%s)",orig3b$bestModel[1,2],orig3b$bestModel[1,3])), values = c("blue", "red")) +
+geom_vline(xintercept = orig3b$bestParamDetail, linetype="dashed", color = "red") +
+ggtitle("Japan's Natural Cubic Spline: Old vs New")
+```
+
+Curva menunjukkan bahwa belokan bisa diminimalisasi. Konsekuensinya, RMSE meningkat dari 4.15 menjadi 4.50.
+
+
+### Nilai observasi *vs* prediksi
+
+```{r}
+orig3b$pltPredGrid
+```
+
+
+## All Models
+
+Dengan demikin diperoleh pemodelan optimal untuk masing-masing negara asal sebagai berikut:
+
+
+```{r}
+finalModels <- rbind(orig1$bestModel, orig2$bestModel, orig3b$bestModel)
+finalModels
+```
+
+```{r, fig.height=5}
+finalPred <- rbind(orig1$predBestFinal, orig2$predBestFinal, orig3b$predBestFinal)
+
+finalPred <- merge(finalPred, finalModels)
+finalPred$originModel <- sprintf('%s: %s(%s)', finalPred$origin, finalPred$method, finalPred$param)
+
+
+ggplot(finalPred) +
+  geom_point(aes(x = horsepower, y = mpg, color = originModel), alpha = 0.8) +
+  geom_line(aes(x = horsepower, y = pred, color = originModel), size = 1) +
+  scale_color_manual(values = c("black", "red", "blue"))  +
+  theme_classic() +
+  ggtitle("Modeling Miles per Gallon (MPG) vs Horsepower, by Country of Origin") +
+  xlab("Horsepower") + ylab("Miles per Gallon") +
+  theme(legend.title = element_blank(), 
+        legend.position = "bottom", 
+        legend.box = "horizontal")
+```
+
+
+# Kesimpulan
+
+
+* Perlu kehati-hatian dalam memilih *tuning parameter*.
+* Pemodelan terbaik hasil dari *cross validation*, belum tentu merupakan model yang bisa diterima,
+sehingga perlu pandangan analis untuk melakukan evaluasi terhadap model-model yang diperoleh.
+* Model non-linier mampu digunakan untuk melakukan prediksi efisiensi bahan bakar menggunakan *horsepower*.
+* Secara umum, semakin tinggi *horsepower*, maka kendaraan semakin boros dalam penggunaan bahan bakar (*mpg* lebih rendah).
+Hal ini berlaku untuk ketiga negara asal.
+* Berdasarkan plot terakhir, terlihat bahwa untuk `horsepower` yang sama, kendaraan yang berasal dari Jepang lebih hemat dalam penggunaan bahan bakar,
+diikuti oleh Eropa dan Amerika.
+
+
+# Daftar Pustaka
+
+Dito, Gerry A. (2021), *Regresi Polinomial, Regresi Fungsi Tangga dan Regresi Spline di R*, https://gerrydito.github.io/Regresi-Polinomial,-Regresi-Fungsi-Tangga-dan-Regresi-Spline/ (Oct 29, 2021).
+
+Harrell, Frank E., Jr. (2015). *Regression Modeling Strategies. Springer Series in Statistics*, Springer.
+
+James, G.; Witten, D.; Hastie, T. & Tibshirani, R. (2013), *An Introduction to Statistical Learning: with Applications in R*, Springer.
+
+
+
