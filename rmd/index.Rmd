@@ -9,3 +9,6 @@ knitr::opts_chunk$set(echo = TRUE)
 
 
 * [Moving Beyond Linearity](beyond-linear.html)
+* [Manipulasi Data dengan `dplyr`](manipulasi-data-dplyr.html)
+* [Peta *Choropleth* dengan R dan Leaflet](choropleth-leaflet.html)
+* [Join Tabel dan Peta Choropleth](join-table-dan-peta.html)
